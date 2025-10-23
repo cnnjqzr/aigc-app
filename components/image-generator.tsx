@@ -46,33 +46,97 @@ export default function ImageGenerator({ onGenerate }: ImageGeneratorProps) {
     setIsGenerating(true)
 
     try {
-      // 模拟API调用
-      await new Promise(resolve => setTimeout(resolve, 2000))
-
-      const generation = {
-        id: Date.now().toString(),
-        type: "image",
-        mode: mode,
-        model: model,
-        prompt: prompt,
-        url: `https://picsum.photos/seed/${Date.now()}/512/512`, // 示例图片
-        timestamp: new Date(),
-        aspectRatio: aspectRatio,
-        steps: steps[0],
+      // 准备表单数据
+      const formData = new FormData()
+      formData.append("prompt", prompt)
+      formData.append("model", model)
+      formData.append("mode", mode)
+      formData.append("aspectRatio", aspectRatio)
+      formData.append("steps", steps[0].toString())
+      
+      if (imageFile && mode === "image-to-image") {
+        formData.append("image", imageFile)
       }
 
-      onGenerate(generation)
-      
-      // 重置表单
-      setPrompt("")
-      setImageFile(null)
-      setImagePreview("")
+      // 调用生成 API
+      const response = await fetch("/api/generate/image", {
+        method: "POST",
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.error || "生成失败")
+      }
+
+      const result = await response.json()
+
+      // 如果是 nano-banana，需要轮询任务状态
+      if (model === "nano-banana" && result.taskId) {
+        await pollTaskStatus(result.taskId)
+      } else if (result.data) {
+        // seedream 或其他模型直接返回结果
+        onGenerate(result.data)
+        
+        // 重置表单
+        setPrompt("")
+        setImageFile(null)
+        setImagePreview("")
+      }
     } catch (error) {
       console.error("生成失败:", error)
-      alert("生成失败，请重试")
+      alert(error instanceof Error ? error.message : "生成失败，请重试")
     } finally {
       setIsGenerating(false)
     }
+  }
+
+  const pollTaskStatus = async (taskId: string) => {
+    const maxAttempts = 60 // 最多轮询60次
+    const pollInterval = 3000 // 每3秒轮询一次
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        // 等待一段时间再查询
+        if (attempt > 0) {
+          await new Promise(resolve => setTimeout(resolve, pollInterval))
+        }
+
+        const response = await fetch(`/api/task/${taskId}`)
+        
+        if (!response.ok) {
+          throw new Error("查询任务状态失败")
+        }
+
+        const result = await response.json()
+        const task = result.data
+
+        console.log(`任务状态 (${attempt + 1}/${maxAttempts}):`, task.status)
+
+        if (task.status === "completed") {
+          // 任务完成，显示结果
+          if (task.generation) {
+            onGenerate(task.generation)
+            
+            // 重置表单
+            setPrompt("")
+            setImageFile(null)
+            setImagePreview("")
+          }
+          return
+        } else if (task.status === "failed") {
+          // 任务失败
+          throw new Error(task.error || "生成失败")
+        }
+        // 如果状态是 pending 或 processing，继续轮询
+      } catch (error) {
+        console.error("轮询任务状态失败:", error)
+        throw error
+      }
+    }
+
+    // 超时
+    throw new Error("生成超时，请稍后重试")
   }
 
   return (
